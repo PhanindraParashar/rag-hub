@@ -3,6 +3,9 @@ from typing import List, Dict, Any, Optional, Sequence
 from langchain_text_splitters import TokenTextSplitter, TextSplitter
 import tiktoken
 from langchain_core.documents import Document
+import re
+import numpy as np
+from langchain.embeddings.base import Embeddings
 
 class CustomTokenSplitter(TextSplitter):
     """Token‑aware splitter with strict keyword filtering."""
@@ -149,4 +152,182 @@ class CustomTokenSplitter(TextSplitter):
 
         return Document(page_content=text, metadata=meta)
 
+class CustomSemanticChunker(TextSplitter):
+    """
+    Sentence‑level semantic chunker with strict keyword filtering.
+
+    This class encapsulates all the logic for splitting documents based on
+    semantic similarity at the sentence level, including helper methods for
+    text processing and vector math.
+    """
+    _SENT_RE = re.compile(r"(?<=[.!?])\s+")
+
+    @staticmethod
+    def _sent_tokenize(text: str) -> List[str]:
+        """Very simple sentence splitter; good enough for embeddings."""
+        return [s.strip() for s in CustomSemanticChunker._SENT_RE.split(text) if s.strip()]
+
+    @staticmethod
+    def _cosine(a: np.ndarray, b: np.ndarray) -> float:
+        """Calculates cosine similarity between two numpy arrays."""
+        return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-9))
+
+    def __init__(
+        self,
+        *,
+        embeddings: Embeddings,
+        chunk_size: int,
+        chunk_overlap: int = 0,
+        similarity_threshold: float = 0.75,
+        min_tokens: int = 20,
+        encoding_name: str = "cl100k_base",
+        separator: str = "\n\n---\n\n",
+        keyword_annotator: Optional[
+            BM25KeywordAnnotator | TFIDFKeywordAnnotator
+        ] = None,
+    ) -> None:
+        super().__init__(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+        self._emb = embeddings
+        self._sim_thr = similarity_threshold
+        self._min_tokens = min_tokens
+        self._separator = separator
+        self._tokenizer = tiktoken.get_encoding(encoding_name)
+        self._tok_splitter = TokenTextSplitter(
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            encoding_name=encoding_name,
+        )
+        self._annotator = keyword_annotator
+
+    # ---------------- helpers ------------------------------------------ #
+    def _tok_len(self, text: str) -> int:
+        return len(self._tokenizer.encode(text))
+
+    @staticmethod
+    def _merge_meta(metas: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+        if not metas:
+            return {}
+        merged: Dict[str, Any] = {
+            k: v
+            for k, v in metas[0].items()
+            if not isinstance(v, (list, dict))
+        }
+        pages, kw = set[int](), set[str]()
+        for m in metas:
+            pn = m.get("page_number")
+            if pn is not None:
+                pages.add(pn)
+            kw.update(m.get("keywords", []))
+        if pages:
+            merged["pages"] = sp = sorted(pages)
+            merged["page_number"] = sp[0]
+        if kw:
+            merged["keywords"] = sorted(kw)
+        return merged
+
+    def _filter_keywords(self, text: str, meta: Dict[str, Any]) -> None:
+        if not (self._annotator and "keywords" in meta):
+            return
+        lemmas = set(self._annotator._process_text_to_tokens(text))
+        raw = text.lower()
+        def ok(kw: str) -> bool:
+            return kw in lemmas or re.search(rf"\b{re.escape(kw.lower())}\b", raw)
+        meta["keywords"] = [k for k in meta["keywords"] if ok(k)]
+        cap = self._annotator.cfg.max_keywords if self._annotator else None
+        if cap:
+            meta["keywords"] = meta["keywords"][:cap]
+
+    # -------------- TextSplitter abstract ------------------------------ #
+    def split_text(self, text: str) -> List[str]:
+        return self._tok_splitter.split_text(text)
+
+    # ------------------------------------------------------------------- #
+    def split_documents(self, docs: List[Document]) -> List[Document]:
+        if not docs:
+            return []
+        # 0) optional page‑level keyword annotation (global IDF)
+        kw_by_page: Dict[int, List[str]] = {}
+        if self._annotator:
+            pages_sorted = sorted(docs, key=lambda d: d.metadata.get("page_number", 0))
+            full_text = self._annotator.cfg.page_splitter.join(
+                p.page_content for p in pages_sorted
+            )
+            src = pages_sorted[0].metadata.get("source", "unknown")
+            annotated = self._annotator(full_text, src)
+            kw_by_page = {
+                p.metadata["page_number"]: p.metadata.get("keywords", [])
+                for p in annotated
+            }
+        # 1) sentence‑level segmentation inside each page
+        segs: List[Document] = []
+        for page in docs:
+            base_meta = dict(page.metadata)
+            pn = base_meta.get("page_number")
+            if kw_by_page:
+                base_meta["keywords"] = kw_by_page.get(pn, [])
+            # Use the class method for sentence tokenization
+            sentences = self._sent_tokenize(page.page_content)
+            if not sentences:
+                continue
+            embeds = [np.asarray(v, float) for v in self._emb.embed_documents(sentences)]
+            current: List[str] = []
+            centroid: Optional[np.ndarray] = None
+            toks = 0
+            for sent, emb_vec in zip(sentences, embeds):
+                s_tok = self._tok_len(sent)
+                if current:
+                    # Use the class method for cosine similarity
+                    sim_ok = self._cosine(centroid, emb_vec) >= self._sim_thr
+                    size_ok = toks + s_tok <= self._chunk_size
+                    if not (sim_ok and size_ok):
+                        segs.append(
+                            Document(page_content=" ".join(current), metadata=base_meta)
+                        )
+                        current, centroid, toks = [], None, 0
+                current.append(sent)
+                centroid = emb_vec if centroid is None else (centroid + emb_vec) / 2.0
+                toks += s_tok
+            if current:
+                segs.append(Document(page_content=" ".join(current), metadata=base_meta))
+        if not segs:
+            return []
+        # 2) merge segments across pages ≤ token budget
+        merged: List[Document] = []
+        parts, metas, tokens = [], [], 0
+        sep_toks = self._tok_len(self._separator)
+        def _emit() -> None:
+            text = self._separator.join(parts)
+            meta = self._merge_meta(metas)
+            self._filter_keywords(text, meta)
+            merged.append(Document(page_content=text, metadata=meta))
+        for seg in segs:
+            s_tok = self._tok_len(seg.page_content)
+            new_tok = tokens + s_tok + (sep_toks if parts else 0)
+            if new_tok > self._chunk_size and parts:
+                _emit()
+                parts, metas, tokens = [], [], 0
+            parts.append(seg.page_content)
+            metas.append(seg.metadata)
+            tokens = new_tok
+        if parts:
+            _emit()
+        # 3) enforce min_tokens by merging tail chunks where possible
+        if self._min_tokens and len(merged) > 1:
+            fixed: List[Document] = [merged[0]]
+            for nxt in merged[1:]:
+                prev = fixed[-1]
+                if (
+                    self._tok_len(prev.page_content) < self._min_tokens
+                    or self._tok_len(nxt.page_content) < self._min_tokens
+                ):
+                    combined = self._tok_len(prev.page_content) + self._tok_len(nxt.page_content) + sep_toks
+                    if combined <= self._chunk_size:
+                        txt = prev.page_content + self._separator + nxt.page_content
+                        meta = self._merge_meta([prev.metadata, nxt.metadata])
+                        self._filter_keywords(txt, meta)
+                        fixed[-1] = Document(page_content=txt, metadata=meta)
+                        continue
+                fixed.append(nxt)
+            merged = fixed
+        return merged
 
