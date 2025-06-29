@@ -9,9 +9,8 @@ from __future__ import annotations
 
 import math
 import re
-import warnings
 from collections import Counter
-from typing import List, Dict, Union, Optional
+from typing import List, Dict
 
 import numpy as np
 from langchain_core.documents import Document
@@ -24,7 +23,7 @@ try:
     _NLP = spacy.load("en_core_web_sm", disable=["parser", "ner", "textcat"])
 except Exception:
     _NLP = None
-    warnings.warn(
+    print(
         "spaCy or its English model not found – lemmatisation disabled. "
         "Run `pip install spacy && python -m spacy download en_core_web_sm` "
         "to enable it."
