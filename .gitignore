@@ -1,7 +1,15 @@
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
-*$py.class
+*$py.class 
+
+Data/
+.DS_Store
+../.conda/
+../.trunk/
+.conda/
+.trunk/
+test.ipynb
 
 # C extensions
 *.so
