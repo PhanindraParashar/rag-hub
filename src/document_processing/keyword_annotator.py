@@ -11,7 +11,7 @@ import math
 import re
 import warnings
 from collections import Counter
-from typing import List
+from typing import List, Dict, Union, Optional
 
 import numpy as np
 from langchain_core.documents import Document
