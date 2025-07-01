@@ -38,6 +38,9 @@ except Exception:
         "to enable it."
     )
 
+from sklearn.feature_extraction.text import ENGLISH_STOP_WORDS
+from keyphrase_vectorizers import KeyphraseCountVectorizer
+from keybert import KeyBERT
 # --------------------------------------------------------------------------
 # Base Class for Centralized Text Processing
 # --------------------------------------------------------------------------
@@ -248,3 +251,94 @@ class TFIDFKeywordAnnotator(BaseTextProcessor):
             ordered = ordered[:self.cfg.max_keywords]
 
         return PageKeywords(page_number=page_number, keywords=ordered)
+
+class KeyBertAnnotator(BaseTextProcessor):
+    def __init__(
+        self,
+        *,
+        use_ngrams: bool = False,
+        keyphrase_ngram_range: Tuple[int, int] = (1, 2),
+        top_n: int = 15,
+        diversity: float = 0.9,
+        STOPWORDS: frozenset = ENGLISH_STOP_WORDS,
+    ) -> None:
+        super().__init__()
+
+        self._model = KeyBERT()
+        self._vectorizer = KeyphraseCountVectorizer(stop_words=self._stopwords)
+
+        self._use_ngrams = use_ngrams
+        self._ngram_range = keyphrase_ngram_range
+        self._top_n = top_n
+        self._diversity = diversity
+
+        self.STOPWORDS = STOPWORDS
+        self.kw_model = KeyBERT()
+        self.vectorizer = KeyphraseCountVectorizer()
+        self._lemmatised_stops = [self._process_text_to_tokens(i) for i in list(self.STOPWORDS)]
+
+    # ------------------------------------------------------------------ #
+    def _extract_keywords(self, text: str) -> List[str]:
+        if self._use_ngrams:
+            pairs = self._model.extract_keywords(
+                text,
+                vectorizer=self._vectorizer,
+                keyphrase_ngram_range=self._ngram_range,
+                use_mmr=True,
+                diversity=self._diversity,
+                top_n=self._top_n,
+            )
+        else:
+            pairs = self._model.extract_keywords(
+                text, vectorizer=self._vectorizer, top_n=self._top_n
+            )
+            
+        processed_kw = [self._process_text_to_tokens(keyword[0]) for keyword in pairs]
+        final_keywords = []
+        for i in processed_kw:
+            final_keywords.extend(i)
+        final_keywords = list(set(final_keywords))
+        return [kw for kw in final_keywords if kw not in self._lemmatised_stops]
+
+    # ------------------------------------------------------------------ #
+    def __call__(
+        self, text_or_docs: Union[str, List[Document]], document_name: str
+    ) -> List[Document]:
+        # -------------------------------------------------------------- #
+        # Case 1: Already split into page-Documents
+        # -------------------------------------------------------------- #
+        if isinstance(text_or_docs, list):
+            out: List[Document] = []
+            for page_doc in text_or_docs:
+                txt = page_doc.page_content.strip()
+                if not txt:
+                    continue
+                kw = self._extract_keywords(txt)
+                meta = dict(page_doc.metadata)
+                meta.setdefault("source", document_name)
+                meta["keywords"] = kw
+                out.append(Document(page_content=txt, metadata=meta))
+            return out
+
+        # -------------------------------------------------------------- #
+        # Case 2: Raw text string (do our own page split)
+        # -------------------------------------------------------------- #
+        pages, _ = self._split_and_tokenise_pages(text_or_docs)
+
+        docs: List[Document] = []
+        for i, page_text in enumerate(pages, start=1):
+            stripped = page_text.strip()
+            if not stripped:
+                continue
+            kw = self._extract_keywords(stripped)
+            docs.append(
+                Document(
+                    page_content=stripped,
+                    metadata={
+                        "source": document_name,
+                        "page_number": i,
+                        "keywords": kw,
+                    },
+                )
+            )
+        return docs
