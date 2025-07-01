@@ -349,7 +349,7 @@ class SpectralSegmentationChunker(TextSplitter):
         chunk_size: int,
         chunk_overlap: int = 0,
         window_k: int = 3,
-        n_splits: int = 10,
+        #n_splits: int = 10,
         min_words: int = 30,
         encoding_name: str = "cl100k_base",
         separator: str = "\n\n---\n\n",
@@ -360,7 +360,7 @@ class SpectralSegmentationChunker(TextSplitter):
         super().__init__(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
         self._emb = embeddings
         self._k = max(1, window_k)
-        self._n_splits = max(1, n_splits)
+        #self._n_splits = max(1, n_splits)
         self._min_words = max(1, min_words)
         self._separator = separator
         self._tokenizer = tiktoken.get_encoding(encoding_name)
@@ -480,7 +480,19 @@ class SpectralSegmentationChunker(TextSplitter):
         _, eigvecs = np.linalg.eigh(L)
         fiedler = eigvecs[:, 1]
         jumps = np.abs(np.diff(fiedler))
-        k = min(self._n_splits, n - 1)
+        # Estimate number of splits based on input length and density
+        page_splitter = self._annotator.cfg.page_splitter if self._annotator else "\n\n---\n\n"
+        full_text = page_splitter.join([i.page_content for i in docs])
+        page_approx = int(len(full_text.split(' '))/500)
+        density_ratio = page_approx / max(1, len(docs))
+
+        if density_ratio < 0.6:
+            _n_splits = int(page_approx * 0.8) + 1
+        elif density_ratio < 1:
+            _n_splits = int(page_approx * 1.3) + 1
+        else:  # density_ratio ≥ 1
+            _n_splits = int(page_approx * 1.4) + 1
+        k = min(_n_splits, n - 1)
         split_after = sorted(np.argsort(-jumps)[:k] + 1)  # positions where we cut
 
         # --- (3) build final chunks WITHOUT TokenTextSplitter fallback  ▶▶ FIX ◀◀ #
