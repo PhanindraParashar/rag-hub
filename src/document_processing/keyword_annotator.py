@@ -19,7 +19,7 @@ from __future__ import annotations
 import math
 import re
 from collections import Counter
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Union
 
 import numpy as np
 from langchain_core.documents import Document
@@ -292,7 +292,7 @@ class KeyBertAnnotator(BaseTextProcessor):
             pairs = self._model.extract_keywords(
                 text, vectorizer=self._vectorizer, top_n=self._top_n
             )
-            
+
         processed_kw = [self._process_text_to_tokens(keyword[0]) for keyword in pairs]
         final_keywords = []
         for i in processed_kw:
