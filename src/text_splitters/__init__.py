@@ -81,18 +81,21 @@ class CustomTokenSplitter(TextSplitter):
         if not docs:
             return []
 
-        # 0) annotate pages once (keeps global‑doc IDF)
+        # 0) annotate pages once (keeps global-doc IDF)
         kw_by_page: Dict[int, List[str]] = {}
         if self._annotator:
             pages_sorted = sorted(docs, key=lambda d: d.metadata.get("page_number", 0))
-            full_text = self._annotator.cfg.page_splitter.join(p.page_content for p in pages_sorted)
+            full_text = self._annotator.cfg.page_splitter.join(
+                p.page_content for p in pages_sorted
+            )
             src = pages_sorted[0].metadata.get("source", "unknown")
             annotated = self._annotator(full_text, src)
             kw_by_page = {
-                p.metadata["page_number"]: p.metadata.get("keywords", []) for p in annotated
+                p.metadata["page_number"]: p.metadata.get("keywords", [])
+                for p in annotated
             }
 
-        # 1) page → sub‑chunks
+        # 1) each page → sub-chunks (all of them obey chunk_size already)
         subs: List[Document] = []
         for page in docs:
             meta = dict(page.metadata)
@@ -100,30 +103,38 @@ class CustomTokenSplitter(TextSplitter):
             if kw_by_page:
                 meta["keywords"] = kw_by_page.get(pn, [])
             subs.extend(
-                self._token_splitter.create_documents([page.page_content], metadatas=[meta])
+                self._token_splitter.create_documents(
+                    [page.page_content], metadatas=[meta]
+                )
             )
 
         if not subs:
             return []
 
-        # 2) merge while respecting token budget
+        # 2) merge sub-chunks ≤ self._chunk_size tokens
         merged: List[Document] = []
-        parts, metas = [], []
+        parts: List[str] = []
+        metas: List[Dict[str, Any]] = []
         tokens = 0
         sep_toks = self._tok_len(self._separator)
 
         for sub in subs:
             sub_toks = self._tok_len(sub.page_content)
-            new_tokens = tokens + sub_toks + (sep_toks if parts else 0)
-            if new_tokens > self._chunk_size and parts:
+
+            # flush current chunk if the next addition would overflow the budget
+            if parts and tokens + sep_toks + sub_toks > self._chunk_size:
                 merged.append(self._finalise(parts, metas))
-                parts, metas, tokens = [], [], 0
+                parts, metas, tokens = [], [], 0  # start fresh
+
+            # add the new sub-chunk
             parts.append(sub.page_content)
             metas.append(sub.metadata)
-            tokens = new_tokens
+            tokens += (sep_toks if tokens else 0) + sub_toks  # sep only after first part
 
+        # flush whatever is left
         if parts:
             merged.append(self._finalise(parts, metas))
+
         return merged
 
     # -------------------------------------------------------------------- #

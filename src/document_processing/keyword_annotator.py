@@ -41,6 +41,8 @@ except Exception:
 from sklearn.feature_extraction.text import ENGLISH_STOP_WORDS
 from keyphrase_vectorizers import KeyphraseCountVectorizer
 from keybert import KeyBERT
+import nltk
+
 # --------------------------------------------------------------------------
 # Base Class for Centralized Text Processing
 # --------------------------------------------------------------------------
@@ -342,3 +344,27 @@ class KeyBertAnnotator(BaseTextProcessor):
                 )
             )
         return docs
+
+class NLTKKeywordAnnotator(QueryProcessor):
+    def __init__(self, processing_tags: Tuple[str] = ('NN', 'NNS', 'NNP', 'NNPS', 'PDT'), non_processing_tags: Tuple[str] = ('CD', 'FW', 'LS'), stop_words: frozenset = ENGLISH_STOP_WORDS):
+        super().__init__()
+        self.processing_tags = processing_tags
+        self.non_processing_tags = non_processing_tags
+        self.stop_words = stop_words
+
+    def extract_nltk_keywords(self, text: str) -> List[str]:
+        tagged = nltk.pos_tag(nltk.word_tokenize(text))
+        initial_kw = [word[0] for word in tagged if word[1] in self.processing_tags]
+        processed_kw = []
+        for word in initial_kw:
+            processed_word = self.process(word)
+            if processed_word:
+                processed_kw.extend(processed_word)
+        keywords = processed_kw + [word[0] for word in tagged if word[1] in self.non_processing_tags]
+        keywords = list(set([i.lower() for i in keywords]))
+        keywords = [i.replace('.','').replace(' ','') for i in keywords if len(i) > 1 and i not in self.stop_words]
+        return keywords
+
+    def __call__(self, text: str) -> List[str]:
+        return self.extract_nltk_keywords(text)
+
